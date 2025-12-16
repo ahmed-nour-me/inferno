@@ -1,4 +1,4 @@
-name: Build Inferno
+name: Build Inferno USB Creator
 
 on:
   push:
@@ -7,79 +7,111 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-env:
-  BUILD_TYPE: Release
-
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install dependencies
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.1
+      
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      
+    - name: Create build directory
+      run: mkdir build
+      
+    - name: Compile Inferno
+      shell: cmd
       run: |
-        choco install mingw -y
-        choco install cmake -y
-        choco install make -y
+        cl.exe /EHsc /std:c++17 /O2 /MT ^
+        /D_UNICODE /DUNICODE ^
+        /I"%INCLUDE%" ^
+        /Fe:build\Inferno.exe ^
+        inferno.cpp ^
+        /link ^
+        user32.lib gdi32.lib comctl32.lib comdlg32.lib ^
+        shell32.lib ole32.lib setupapi.lib ^
+        /SUBSYSTEM:WINDOWS ^
+        /MANIFESTUAC:level='requireAdministrator'
         
-    - name: Configure CMake
+    - name: Verify build
       run: |
-        mkdir build
-        cd build
-        cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} ..
-        
-    - name: Build
+        if (Test-Path "build\Inferno.exe") {
+          Write-Host "Build successful! Inferno.exe created."
+          Get-Item "build\Inferno.exe" | Select-Object Name, Length, LastWriteTime
+        } else {
+          Write-Error "Build failed! Inferno.exe not found."
+          exit 1
+        }
+      shell: pwsh
+      
+    - name: Create resources folder
       run: |
-        cd build
-        cmake --build . --config ${{env.BUILD_TYPE}}
-        
-    - name: Create Default Icon
-      run: |
-        # إنشاء أيقونة افتراضية إذا لم تكن موجودة
-        if not exist inferno.png (
-          echo Creating default icon...
-          # يمكن إضافة سكريبت لإنشاء أيقونة هنا
-        )
-        
-    - name: Package Application
-      run: |
-        mkdir -p dist
-        copy build\inferno.exe dist\
-        if exist inferno.png copy inferno.png dist\
-        
-        # إنشاء ملف README
-        echo # Inferno - Advanced OS Burning Tool > dist\README.md
-        echo. >> dist\README.md
-        echo ## Features >> dist\README.md
-        echo - Supports Windows, Linux, macOS images >> dist\README.md
-        echo - Multiple partition schemes >> dist\README.md
-        echo - Advanced options >> dist\README.md
-        echo - Logging system >> dist\README.md
-        
-        # إنشاء سكريبت التثبيت
-        echo @echo off > dist\install.bat
-        echo echo Installing Inferno... >> dist\install.bat
-        echo if not exist "%ProgramFiles%\Inferno" mkdir "%ProgramFiles%\Inferno" >> dist\install.bat
-        echo copy inferno.exe "%ProgramFiles%\Inferno\" >> dist\install.bat
-        echo copy inferno.png "%ProgramFiles%\Inferno\" >> dist\install.bat
-        echo echo Creating shortcut... >> dist\install.bat
-        echo echo WindowsScriptHost.CreateShortcut("%USERPROFILE%\Desktop\Inferno.lnk").TargetPath = "%ProgramFiles%\Inferno\inferno.exe" > "%TEMP%\create_shortcut.vbs" >> dist\install.bat
-        echo cscript //nologo "%TEMP%\create_shortcut.vbs" >> dist\install.bat
-        echo echo Installation complete! >> dist\install.bat
-        
-    - name: Create ZIP Archive
-      run: |
-        cd dist
-        7z a inferno-windows-${{ github.sha }}.zip *
-        
-    - name: Upload Artifacts
+        mkdir build\resources
+        echo "Place inferno.png logo here" > build\resources\README.txt
+      
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Inferno-Windows
+        name: Inferno-USB-Creator-Windows
         path: |
-          dist/inferno.exe
-          dist/inferno.png
-          dist/README.md
-          dist/inferno-windows-*.zip
-        retention-days: 30
+          build/Inferno.exe
+          build/resources/
+        retention-days: 90
+        
+    - name: Create Release
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v2.0.0-${{ github.run_number }}
+        name: Inferno USB Creator v2.0.0 Build ${{ github.run_number }}
+        body: |
+          ## Inferno USB Creator - Advanced Bootable USB Tool
+          
+          **Developer:** Ahmed Nour Ahmed (Qena, Egypt)
+          
+          ### Features:
+          - ✅ Multi-boot USB support
+          - ✅ UEFI & Legacy BIOS compatibility
+          - ✅ Persistent storage partition creation
+          - ✅ Data verification after write
+          - ✅ USB backup and restore
+          - ✅ Speed testing capabilities
+          - ✅ Secure Boot support
+          - ✅ Multiple file systems (FAT32, NTFS, exFAT)
+          - ✅ Bad blocks checking
+          - ✅ Compression support
+          - ✅ Extended label and icon files
+          
+          ### System Requirements:
+          - Windows 7 or later
+          - Administrator privileges required
+          - USB device for bootable media creation
+          
+          ### Installation:
+          1. Download Inferno.exe
+          2. Place inferno.png logo in the same directory (optional)
+          3. Run as Administrator
+          
+          ### Usage:
+          1. Select your USB device
+          2. Browse for ISO file
+          3. Configure options (file system, partition scheme, etc.)
+          4. Click START to begin
+          
+          **⚠️ WARNING:** All data on the selected USB device will be erased!
+          
+          ### Build Info:
+          - Build Number: ${{ github.run_number }}
+          - Commit: ${{ github.sha }}
+          - Date: ${{ github.event.head_commit.timestamp }}
+        files: |
+          build/Inferno.exe
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
