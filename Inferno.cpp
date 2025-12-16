@@ -1,1122 +1,1187 @@
-/*
- * Inferno - أداة متقدمة لحرق أنظمة التشغيل
- * إصدار: 4.0.0
- * المطور: فريق Inferno
- * الرخصة: GPL v3
- */
-
 #include <windows.h>
-#include <windowsx.h>
 #include <commctrl.h>
-#include <commdlg.h>
+#include <shobjidl.h>
 #include <shlobj.h>
-#include <shellapi.h>
-#include <winioctl.h>
-#include <setupapi.h>
-#include <winternl.h>
-#include <dbt.h>
 #include <string>
 #include <vector>
-#include <map>
-#include <algorithm>
-#include <cstdlib>
-#include <ctime>
 #include <fstream>
+#include <thread>
+#include <atomic>
+#include <algorithm>
 #include <sstream>
 #include <iomanip>
-#include <thread>
-#include <mutex>
-#include <atomic>
-#include <condition_variable>
-#include <functional>
-#include <regex>
-#include <codecvt>
-#include <locale>
+#include <winioctl.h>
+#include <setupapi.h>
+#include <cfgmgr32.h>
+#include <initguid.h>
+#include <devguid.h>
 
 #pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "setupapi.lib")
-#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(linker,"\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-// تعريفات ثوابت
-#define INFERNO_VERSION L"4.0.0"
-#define INFERNO_BUILD L"2024.01"
-#define WM_UPDATE_PROGRESS (WM_USER + 100)
-#define WM_DEVICE_CHANGE (WM_USER + 101)
-#define WM_LOG_MESSAGE (WM_USER + 102)
-#define MAX_PATH_LENGTH 32767
+// Application Info
+#define APP_NAME L"Inferno USB Creator"
+#define APP_VERSION L"2.0.0"
+#define DEVELOPER L"Ahmed Nour Ahmed - Qena, Egypt"
 
-// هياكل البيانات
-struct DeviceInfo {
-    std::wstring devicePath;
-    std::wstring friendlyName;
-    std::wstring volumeName;
-    uint64_t totalSize;
-    uint64_t freeSize;
-    uint32_t diskNumber;
-    bool isRemovable;
-    bool isUSB;
-    bool isBootable;
-    std::wstring fileSystem;
-    DWORD serialNumber;
-};
+// Control IDs
+#define IDC_DEVICE_COMBO 1001
+#define IDC_ISO_PATH 1002
+#define IDC_BROWSE_BTN 1003
+#define IDC_PARTITION_COMBO 1004
+#define IDC_FILESYSTEM_COMBO 1005
+#define IDC_CLUSTER_COMBO 1006
+#define IDC_LABEL_EDIT 1007
+#define IDC_START_BTN 1008
+#define IDC_PROGRESS 1009
+#define IDC_STATUS_TEXT 1010
+#define IDC_QUICK_FORMAT 1011
+#define IDC_BAD_BLOCKS 1012
+#define IDC_EXTENDED_LABEL 1013
+#define IDC_BOOTABLE_IMAGE 1014
+#define IDC_PERSISTENT_PARTITION 1015
+#define IDC_VERIFY_WRITE 1016
+#define IDC_ADVANCED_GROUP 1017
+#define IDC_PERSISTENT_SIZE 1018
+#define IDC_COMPRESSION_CHECK 1019
+#define IDC_BACKUP_BTN 1020
+#define IDC_RESTORE_BTN 1021
+#define IDC_MULTI_BOOT 1022
+#define IDC_SECURE_BOOT 1023
+#define IDC_UEFI_NTFS 1024
+#define IDC_LIST_USB 1025
+#define IDC_REFRESH_BTN 1026
+#define IDC_SPEED_TEST_BTN 1027
+#define IDC_ADVANCED_TAB 1028
 
-struct ISOImage {
+// Menu IDs
+#define IDM_ABOUT 2001
+#define IDM_SETTINGS 2002
+#define IDM_EXIT 2003
+#define IDM_CHECK_UPDATE 2004
+#define IDM_LOG 2005
+
+// Global variables
+HWND g_hMainWnd = NULL;
+HWND g_hDeviceCombo = NULL;
+HWND g_hIsoPath = NULL;
+HWND g_hProgress = NULL;
+HWND g_hStatusText = NULL;
+HWND g_hPartitionCombo = NULL;
+HWND g_hFileSystemCombo = NULL;
+HWND g_hClusterCombo = NULL;
+HWND g_hLabelEdit = NULL;
+HWND g_hQuickFormat = NULL;
+HWND g_hBadBlocks = NULL;
+HWND g_hExtendedLabel = NULL;
+HWND g_hBootableImage = NULL;
+HWND g_hPersistentPartition = NULL;
+HWND g_hVerifyWrite = NULL;
+HWND g_hPersistentSize = NULL;
+HWND g_hCompression = NULL;
+HWND g_hMultiBoot = NULL;
+HWND g_hSecureBoot = NULL;
+HWND g_hUEFI_NTFS = NULL;
+
+std::atomic<bool> g_isRunning(false);
+std::atomic<bool> g_cancelOperation(false);
+std::wstring g_selectedIsoPath;
+std::wstring g_selectedDevice;
+
+// Structures
+struct USBDevice {
+    std::wstring name;
     std::wstring path;
+    ULONGLONG size;
+    std::wstring driveType;
+    bool isRemovable;
+};
+
+struct ISOInfo {
+    std::wstring path;
+    ULONGLONG size;
     std::wstring label;
-    std::wstring type;
-    uint64_t size;
     bool isBootable;
-    std::wstring architecture;
-    std::wstring version;
+    std::wstring bootType; // BIOS, UEFI, Hybrid
 };
 
-struct PartitionScheme {
-    std::wstring name;
-    std::wstring id;
-    std::wstring description;
-    bool supportsUEFI;
-    bool supportsBIOS;
-};
+std::vector<USBDevice> g_devices;
 
-struct FormatOption {
-    std::wstring name;
-    std::wstring id;
-    std::wstring defaultLabel;
-};
+// Forward declarations
+LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+void InitializeControls(HWND hWnd);
+void RefreshDeviceList();
+void BrowseForISO();
+void StartOperation();
+void UpdateProgress(int percentage, const std::wstring& status);
+std::vector<USBDevice> EnumerateUSBDevices();
+bool FormatDrive(const std::wstring& drive, const std::wstring& fileSystem, const std::wstring& label, bool quickFormat);
+bool WriteISOToUSB(const std::wstring& isoPath, const std::wstring& device);
+bool MakeBootable(const std::wstring& device, const std::wstring& bootType);
+bool VerifyWrite(const std::wstring& device, const std::wstring& isoPath);
+ISOInfo AnalyzeISO(const std::wstring& isoPath);
+bool CreatePersistentPartition(const std::wstring& device, ULONGLONG sizeGB);
+bool EnableSecureBoot(const std::wstring& device);
+bool CreateMultiBootUSB(const std::vector<std::wstring>& isoPaths, const std::wstring& device);
+bool BackupUSB(const std::wstring& device, const std::wstring& backupPath);
+bool RestoreUSB(const std::wstring& backupPath, const std::wstring& device);
+bool TestUSBSpeed(const std::wstring& device);
+void ShowAboutDialog();
+void ShowSettingsDialog();
+void LogMessage(const std::wstring& message);
+ULONGLONG GetDriveSize(const std::wstring& drive);
+bool IsAdmin();
+bool ElevateProcess();
 
-// فئات مساعدة
-class Logger {
-private:
-    static std::wstring logFilePath;
-    static std::mutex logMutex;
+// Utility functions
+std::wstring FormatSize(ULONGLONG bytes) {
+    const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB", L"TB" };
+    int unitIndex = 0;
+    double size = static_cast<double>(bytes);
     
-public:
-    static void Initialize() {
-        wchar_t path[MAX_PATH_LENGTH];
-        GetModuleFileNameW(NULL, path, MAX_PATH_LENGTH);
-        std::wstring exePath = path;
-        size_t pos = exePath.find_last_of(L"\\/");
-        if (pos != std::wstring::npos) {
-            logFilePath = exePath.substr(0, pos) + L"\\inferno.log";
-        }
-        
-        std::wofstream logFile(logFilePath, std::ios::app);
-        if (logFile.is_open()) {
-            logFile << L"=== Inferno Log Started ===" << std::endl;
-            logFile.close();
-        }
+    while (size >= 1024.0 && unitIndex < 4) {
+        size /= 1024.0;
+        unitIndex++;
     }
     
-    static void Log(const std::wstring& message) {
-        std::lock_guard<std::mutex> lock(logMutex);
-        
-        std::wofstream logFile(logFilePath, std::ios::app);
-        if (logFile.is_open()) {
-            SYSTEMTIME st;
-            GetLocalTime(&st);
-            logFile << std::setw(2) << std::setfill(L'0') << st.wHour << L":"
-                    << std::setw(2) << st.wMinute << L":"
-                    << std::setw(2) << st.wSecond << L" - "
-                    << message << std::endl;
-            logFile.close();
-        }
-        
-        OutputDebugStringW(message.c_str());
-    }
-    
-    static void LogError(const std::wstring& message, DWORD errorCode = 0) {
-        std::wstring errorMsg = L"ERROR: " + message;
-        if (errorCode != 0) {
-            wchar_t* buffer = nullptr;
-            FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
-                          NULL, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                          (LPWSTR)&buffer, 0, NULL);
-            if (buffer) {
-                errorMsg += L" - " + std::wstring(buffer);
-                LocalFree(buffer);
-            }
-        }
-        Log(errorMsg);
-    }
-};
+    wchar_t buffer[50];
+    swprintf_s(buffer, L"%.2f %s", size, units[unitIndex]);
+    return std::wstring(buffer);
+}
 
-std::wstring Logger::logFilePath;
-std::mutex Logger::logMutex;
-
-class USBDetector {
-private:
-    HWND hWnd;
+bool IsAdmin() {
+    BOOL isAdmin = FALSE;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
+    PSID AdministratorsGroup;
     
-public:
-    USBDetector(HWND hwnd) : hWnd(hwnd) {}
-    
-    static BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData) {
-        return TRUE;
+    if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+        DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdministratorsGroup)) {
+        CheckTokenMembership(NULL, AdministratorsGroup, &isAdmin);
+        FreeSid(AdministratorsGroup);
     }
     
-    std::vector<DeviceInfo> DetectDevices() {
-        std::vector<DeviceInfo> devices;
+    return isAdmin == TRUE;
+}
+
+bool ElevateProcess() {
+    wchar_t szPath[MAX_PATH];
+    if (GetModuleFileName(NULL, szPath, ARRAYSIZE(szPath))) {
+        SHELLEXECUTEINFO sei = { sizeof(sei) };
+        sei.lpVerb = L"runas";
+        sei.lpFile = szPath;
+        sei.hwnd = NULL;
+        sei.nShow = SW_NORMAL;
         
-        wchar_t driveLetters[] = L"A:\\";
-        DWORD drivesMask = GetLogicalDrives();
-        
-        for (int i = 0; i < 26; i++) {
-            if (drivesMask & (1 << i)) {
-                driveLetters[0] = L'A' + i;
+        if (ShellExecuteEx(&sei)) {
+            ExitProcess(0);
+            return true;
+        }
+    }
+    return false;
+}
+
+ULONGLONG GetDriveSize(const std::wstring& drive) {
+    HANDLE hDevice = CreateFile(drive.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_EXISTING, 0, NULL);
+    
+    if (hDevice == INVALID_HANDLE_VALUE)
+        return 0;
+    
+    DISK_GEOMETRY_EX diskGeometry;
+    DWORD bytesReturned;
+    
+    if (DeviceIoControl(hDevice, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0,
+        &diskGeometry, sizeof(diskGeometry), &bytesReturned, NULL)) {
+        CloseHandle(hDevice);
+        return diskGeometry.DiskSize.QuadPart;
+    }
+    
+    CloseHandle(hDevice);
+    return 0;
+}
+
+std::vector<USBDevice> EnumerateUSBDevices() {
+    std::vector<USBDevice> devices;
+    DWORD drives = GetLogicalDrives();
+    
+    for (int i = 0; i < 26; i++) {
+        if (drives & (1 << i)) {
+            wchar_t driveLetter = L'A' + i;
+            std::wstring drivePath = std::wstring(1, driveLetter) + L":\\";
+            
+            UINT driveType = GetDriveType(drivePath.c_str());
+            
+            if (driveType == DRIVE_REMOVABLE) {
+                USBDevice device;
+                device.name = std::wstring(1, driveLetter) + L":";
+                device.path = L"\\\\.\\" + std::wstring(1, driveLetter) + L":";
+                device.isRemovable = true;
                 
-                UINT driveType = GetDriveTypeW(driveLetters);
-                if (driveType == DRIVE_REMOVABLE || driveType == DRIVE_FIXED) {
-                    DeviceInfo device;
-                    device.devicePath = driveLetters;
-                    device.isRemovable = (driveType == DRIVE_REMOVABLE);
-                    
-                    // الحصول على معلومات مفصلة
-                    wchar_t volumeName[MAX_PATH_LENGTH];
-                    wchar_t fileSystem[MAX_PATH_LENGTH];
-                    DWORD serialNumber, maxComponentLen, fileSystemFlags;
-                    
-                    if (GetVolumeInformationW(driveLetters, volumeName, MAX_PATH_LENGTH,
-                        &serialNumber, &maxComponentLen, &fileSystemFlags,
-                        fileSystem, MAX_PATH_LENGTH)) {
-                        device.volumeName = volumeName;
-                        device.fileSystem = fileSystem;
-                        device.serialNumber = serialNumber;
-                    }
-                    
-                    // الحصول على حجم القرص
-                    ULARGE_INTEGER totalBytes, freeBytes;
-                    if (GetDiskFreeSpaceExW(driveLetters, NULL, &totalBytes, &freeBytes)) {
-                        device.totalSize = totalBytes.QuadPart;
-                        device.freeSize = freeBytes.QuadPart;
-                    }
-                    
-                    // الحصول على الاسم الودود
-                    wchar_t friendlyName[MAX_PATH_LENGTH];
-                    if (GetDriveDisplayName(driveLetters, friendlyName, MAX_PATH_LENGTH)) {
-                        device.friendlyName = friendlyName;
-                    } else {
-                        device.friendlyName = L"جهاز تخزين " + std::wstring(driveLetters);
-                    }
-                    
-                    // الكشف إذا كان USB
-                    device.isUSB = IsUSBDevice(driveLetters[0]);
-                    
+                wchar_t volumeName[MAX_PATH];
+                DWORD serialNumber;
+                
+                if (GetVolumeInformation(drivePath.c_str(), volumeName, MAX_PATH,
+                    &serialNumber, NULL, NULL, NULL, 0)) {
+                    if (wcslen(volumeName) > 0)
+                        device.name += L" (" + std::wstring(volumeName) + L")";
+                }
+                
+                device.size = GetDriveSize(device.path);
+                
+                if (device.size > 0) {
+                    device.name += L" - " + FormatSize(device.size);
                     devices.push_back(device);
                 }
             }
         }
-        
-        return devices;
     }
     
-private:
-    bool GetDriveDisplayName(const wchar_t* drivePath, wchar_t* displayName, DWORD bufferSize) {
-        SHFILEINFOW sfi = {0};
-        if (SHGetFileInfoW(drivePath, 0, &sfi, sizeof(sfi), SHGFI_DISPLAYNAME)) {
-            wcsncpy_s(displayName, bufferSize, sfi.szDisplayName, _TRUNCATE);
-            return true;
+    return devices;
+}
+
+void RefreshDeviceList() {
+    SendMessage(g_hDeviceCombo, CB_RESETCONTENT, 0, 0);
+    g_devices = EnumerateUSBDevices();
+    
+    if (g_devices.empty()) {
+        SendMessage(g_hDeviceCombo, CB_ADDSTRING, 0, (LPARAM)L"No USB devices found");
+        EnableWindow(GetDlgItem(g_hMainWnd, IDC_START_BTN), FALSE);
+    } else {
+        for (const auto& device : g_devices) {
+            SendMessage(g_hDeviceCombo, CB_ADDSTRING, 0, (LPARAM)device.name.c_str());
         }
+        SendMessage(g_hDeviceCombo, CB_SETCURSEL, 0, 0);
+        EnableWindow(GetDlgItem(g_hMainWnd, IDC_START_BTN), TRUE);
+    }
+}
+
+void BrowseForISO() {
+    IFileOpenDialog* pFileOpen = NULL;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_ALL,
+        IID_IFileOpenDialog, reinterpret_cast<void**>(&pFileOpen));
+    
+    if (SUCCEEDED(hr)) {
+        COMDLG_FILTERSPEC fileTypes[] = {
+            { L"ISO Images", L"*.iso" },
+            { L"All Files", L"*.*" }
+        };
+        
+        pFileOpen->SetFileTypes(ARRAYSIZE(fileTypes), fileTypes);
+        pFileOpen->SetTitle(L"Select ISO Image");
+        
+        hr = pFileOpen->Show(g_hMainWnd);
+        
+        if (SUCCEEDED(hr)) {
+            IShellItem* pItem = NULL;
+            hr = pFileOpen->GetResult(&pItem);
+            
+            if (SUCCEEDED(hr)) {
+                PWSTR pszFilePath = NULL;
+                hr = pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszFilePath);
+                
+                if (SUCCEEDED(hr)) {
+                    g_selectedIsoPath = pszFilePath;
+                    SetWindowText(g_hIsoPath, pszFilePath);
+                    CoTaskMemFree(pszFilePath);
+                }
+                pItem->Release();
+            }
+        }
+        pFileOpen->Release();
+    }
+}
+
+ISOInfo AnalyzeISO(const std::wstring& isoPath) {
+    ISOInfo info;
+    info.path = isoPath;
+    info.isBootable = false;
+    info.bootType = L"Unknown";
+    
+    std::ifstream file(isoPath, std::ios::binary);
+    if (!file.is_open())
+        return info;
+    
+    file.seekg(0, std::ios::end);
+    info.size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    
+    // Check for ISO 9660 signature
+    char buffer[2048];
+    file.seekg(0x8000, std::ios::beg);
+    file.read(buffer, 2048);
+    
+    if (buffer[1] == 'C' && buffer[2] == 'D' && buffer[3] == '0' && buffer[4] == '0' && buffer[5] == '1') {
+        info.isBootable = true;
+        
+        // Check for UEFI boot files
+        file.seekg(0, std::ios::beg);
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        
+        if (content.find("EFI") != std::string::npos || content.find("efi") != std::string::npos) {
+            info.bootType = L"UEFI";
+        } else {
+            info.bootType = L"BIOS";
+        }
+    }
+    
+    file.close();
+    return info;
+}
+
+bool FormatDrive(const std::wstring& drive, const std::wstring& fileSystem, 
+                 const std::wstring& label, bool quickFormat) {
+    LogMessage(L"Formatting drive: " + drive);
+    
+    std::wstring command = L"format " + drive.substr(4, 2) + L" /FS:" + fileSystem;
+    
+    if (quickFormat)
+        command += L" /Q";
+    
+    if (!label.empty())
+        command += L" /V:" + label;
+    
+    command += L" /Y";
+    
+    STARTUPINFO si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    
+    if (CreateProcess(NULL, const_cast<LPWSTR>(command.c_str()), NULL, NULL, FALSE,
+        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        
+        DWORD exitCode;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        
+        return exitCode == 0;
+    }
+    
+    return false;
+}
+
+bool WriteISOToUSB(const std::wstring& isoPath, const std::wstring& device) {
+    LogMessage(L"Writing ISO to USB: " + isoPath);
+    
+    std::ifstream isoFile(isoPath, std::ios::binary);
+    if (!isoFile.is_open()) {
+        LogMessage(L"Failed to open ISO file");
         return false;
     }
     
-    bool IsUSBDevice(wchar_t driveLetter) {
-        std::wstring rootPath = std::wstring(1, driveLetter) + L":\\";
-        std::wstring query = L"\\\\.\\" + std::wstring(1, driveLetter) + L":";
+    HANDLE hDevice = CreateFile(device.c_str(), GENERIC_WRITE | GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        LogMessage(L"Failed to open device");
+        isoFile.close();
+        return false;
+    }
+    
+    isoFile.seekg(0, std::ios::end);
+    ULONGLONG totalSize = isoFile.tellg();
+    isoFile.seekg(0, std::ios::beg);
+    
+    const size_t bufferSize = 1024 * 1024; // 1MB buffer
+    char* buffer = new char[bufferSize];
+    ULONGLONG bytesWritten = 0;
+    
+    while (!isoFile.eof() && !g_cancelOperation) {
+        isoFile.read(buffer, bufferSize);
+        std::streamsize bytesRead = isoFile.gcount();
         
-        HANDLE hDevice = CreateFileW(query.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                    NULL, OPEN_EXISTING, 0, NULL);
-        if (hDevice == INVALID_HANDLE_VALUE) {
-            return false;
-        }
-        
-        STORAGE_PROPERTY_QUERY queryProp = {0};
-        queryProp.PropertyId = StorageDeviceProperty;
-        queryProp.QueryType = PropertyStandardQuery;
-        
-        STORAGE_DEVICE_DESCRIPTOR deviceDescriptor = {0};
-        DWORD bytesReturned = 0;
-        
-        if (DeviceIoControl(hDevice, IOCTL_STORAGE_QUERY_PROPERTY,
-                           &queryProp, sizeof(queryProp),
-                           &deviceDescriptor, sizeof(deviceDescriptor),
-                           &bytesReturned, NULL)) {
-            // تحقق من ناقل الاتصال
-            if (deviceDescriptor.BusType == BusTypeUsb) {
+        if (bytesRead > 0) {
+            DWORD written;
+            if (!WriteFile(hDevice, buffer, static_cast<DWORD>(bytesRead), &written, NULL)) {
+                LogMessage(L"Write error occurred");
+                delete[] buffer;
                 CloseHandle(hDevice);
-                return true;
+                isoFile.close();
+                return false;
             }
+            
+            bytesWritten += written;
+            int progress = static_cast<int>((bytesWritten * 100) / totalSize);
+            UpdateProgress(progress, L"Writing ISO: " + std::to_wstring(progress) + L"%");
         }
+    }
+    
+    delete[] buffer;
+    FlushFileBuffers(hDevice);
+    CloseHandle(hDevice);
+    isoFile.close();
+    
+    if (g_cancelOperation) {
+        LogMessage(L"Operation cancelled by user");
+        return false;
+    }
+    
+    LogMessage(L"ISO written successfully");
+    return true;
+}
+
+bool MakeBootable(const std::wstring& device, const std::wstring& bootType) {
+    LogMessage(L"Making device bootable: " + bootType);
+    
+    if (bootType == L"UEFI" || bootType == L"Hybrid") {
+        // Create EFI partition and install bootloader
+        std::wstring command = L"bootsect /nt60 " + device.substr(4, 2) + L" /mbr /force";
         
+        STARTUPINFO si = { sizeof(si) };
+        PROCESS_INFORMATION pi;
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        
+        if (CreateProcess(NULL, const_cast<LPWSTR>(command.c_str()), NULL, NULL, FALSE,
+            CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+    }
+    
+    return true;
+}
+
+bool VerifyWrite(const std::wstring& device, const std::wstring& isoPath) {
+    LogMessage(L"Verifying write operation...");
+    UpdateProgress(0, L"Verifying data integrity...");
+    
+    std::ifstream isoFile(isoPath, std::ios::binary);
+    if (!isoFile.is_open())
+        return false;
+    
+    HANDLE hDevice = CreateFile(device.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        isoFile.close();
+        return false;
+    }
+    
+    const size_t bufferSize = 1024 * 1024;
+    char* isoBuffer = new char[bufferSize];
+    char* deviceBuffer = new char[bufferSize];
+    
+    bool verified = true;
+    ULONGLONG bytesVerified = 0;
+    
+    isoFile.seekg(0, std::ios::end);
+    ULONGLONG totalSize = isoFile.tellg();
+    isoFile.seekg(0, std::ios::beg);
+    
+    while (!isoFile.eof() && verified) {
+        isoFile.read(isoBuffer, bufferSize);
+        std::streamsize bytesRead = isoFile.gcount();
+        
+        if (bytesRead > 0) {
+            DWORD read;
+            if (!ReadFile(hDevice, deviceBuffer, static_cast<DWORD>(bytesRead), &read, NULL)) {
+                verified = false;
+                break;
+            }
+            
+            if (memcmp(isoBuffer, deviceBuffer, bytesRead) != 0) {
+                verified = false;
+                break;
+            }
+            
+            bytesVerified += bytesRead;
+            int progress = static_cast<int>((bytesVerified * 100) / totalSize);
+            UpdateProgress(progress, L"Verifying: " + std::to_wstring(progress) + L"%");
+        }
+    }
+    
+    delete[] isoBuffer;
+    delete[] deviceBuffer;
+    CloseHandle(hDevice);
+    isoFile.close();
+    
+    LogMessage(verified ? L"Verification successful" : L"Verification failed");
+    return verified;
+}
+
+bool CreatePersistentPartition(const std::wstring& device, ULONGLONG sizeGB) {
+    LogMessage(L"Creating persistent partition: " + std::to_wstring(sizeGB) + L" GB");
+    
+    // Use diskpart to create additional partition
+    std::wstring script = L"select disk " + device.substr(4, 1) + L"\n";
+    script += L"create partition primary size=" + std::to_wstring(sizeGB * 1024) + L"\n";
+    script += L"format fs=ext4 quick label=persistence\n";
+    script += L"assign\n";
+    
+    std::wstring tempFile = L"C:\\temp_diskpart.txt";
+    std::wofstream scriptFile(tempFile);
+    scriptFile << script;
+    scriptFile.close();
+    
+    std::wstring command = L"diskpart /s " + tempFile;
+    
+    STARTUPINFO si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    
+    bool result = false;
+    if (CreateProcess(NULL, const_cast<LPWSTR>(command.c_str()), NULL, NULL, FALSE,
+        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        result = true;
+    }
+    
+    DeleteFile(tempFile.c_str());
+    return result;
+}
+
+bool TestUSBSpeed(const std::wstring& device) {
+    LogMessage(L"Testing USB speed...");
+    UpdateProgress(0, L"Running speed test...");
+    
+    HANDLE hDevice = CreateFile(device.c_str(), GENERIC_WRITE | GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
+    
+    if (hDevice == INVALID_HANDLE_VALUE)
+        return false;
+    
+    const size_t testSize = 50 * 1024 * 1024; // 50MB test
+    const size_t bufferSize = 1024 * 1024; // 1MB buffer
+    char* buffer = new char[bufferSize];
+    memset(buffer, 0xAA, bufferSize);
+    
+    LARGE_INTEGER frequency, start, end;
+    QueryPerformanceFrequency(&frequency);
+    
+    // Write test
+    QueryPerformanceCounter(&start);
+    for (size_t i = 0; i < testSize / bufferSize; i++) {
+        DWORD written;
+        WriteFile(hDevice, buffer, bufferSize, &written, NULL);
+        UpdateProgress((i * 100) / (testSize / bufferSize), L"Write speed test...");
+    }
+    QueryPerformanceCounter(&end);
+    
+    double writeTime = static_cast<double>(end.QuadPart - start.QuadPart) / frequency.QuadPart;
+    double writeSpeed = (testSize / (1024.0 * 1024.0)) / writeTime;
+    
+    // Read test
+    SetFilePointer(hDevice, 0, NULL, FILE_BEGIN);
+    QueryPerformanceCounter(&start);
+    for (size_t i = 0; i < testSize / bufferSize; i++) {
+        DWORD read;
+        ReadFile(hDevice, buffer, bufferSize, &read, NULL);
+        UpdateProgress((i * 100) / (testSize / bufferSize), L"Read speed test...");
+    }
+    QueryPerformanceCounter(&end);
+    
+    double readTime = static_cast<double>(end.QuadPart - start.QuadPart) / frequency.QuadPart;
+    double readSpeed = (testSize / (1024.0 * 1024.0)) / readTime;
+    
+    delete[] buffer;
+    CloseHandle(hDevice);
+    
+    wchar_t msg[256];
+    swprintf_s(msg, L"Write Speed: %.2f MB/s\nRead Speed: %.2f MB/s", writeSpeed, readSpeed);
+    MessageBox(g_hMainWnd, msg, L"Speed Test Results", MB_OK | MB_ICONINFORMATION);
+    
+    return true;
+}
+
+bool BackupUSB(const std::wstring& device, const std::wstring& backupPath) {
+    LogMessage(L"Backing up USB to: " + backupPath);
+    
+    HANDLE hDevice = CreateFile(device.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    
+    if (hDevice == INVALID_HANDLE_VALUE)
+        return false;
+    
+    std::ofstream backupFile(backupPath, std::ios::binary);
+    if (!backupFile.is_open()) {
         CloseHandle(hDevice);
         return false;
     }
-};
+    
+    ULONGLONG driveSize = GetDriveSize(device);
+    const size_t bufferSize = 1024 * 1024;
+    char* buffer = new char[bufferSize];
+    ULONGLONG bytesRead = 0;
+    
+    while (bytesRead < driveSize) {
+        DWORD read;
+        if (!ReadFile(hDevice, buffer, bufferSize, &read, NULL) || read == 0)
+            break;
+        
+        backupFile.write(buffer, read);
+        bytesRead += read;
+        
+        int progress = static_cast<int>((bytesRead * 100) / driveSize);
+        UpdateProgress(progress, L"Backing up: " + std::to_wstring(progress) + L"%");
+    }
+    
+    delete[] buffer;
+    CloseHandle(hDevice);
+    backupFile.close();
+    
+    LogMessage(L"Backup completed successfully");
+    return true;
+}
 
-class ImageReader {
-public:
-    static ISOImage ReadISOInfo(const std::wstring& filePath) {
-        ISOImage image;
-        image.path = filePath;
+bool RestoreUSB(const std::wstring& backupPath, const std::wstring& device) {
+    LogMessage(L"Restoring USB from: " + backupPath);
+    
+    std::ifstream backupFile(backupPath, std::ios::binary);
+    if (!backupFile.is_open())
+        return false;
+    
+    HANDLE hDevice = CreateFile(device.c_str(), GENERIC_WRITE | GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        backupFile.close();
+        return false;
+    }
+    
+    backupFile.seekg(0, std::ios::end);
+    ULONGLONG totalSize = backupFile.tellg();
+    backupFile.seekg(0, std::ios::beg);
+    
+    const size_t bufferSize = 1024 * 1024;
+    char* buffer = new char[bufferSize];
+    ULONGLONG bytesWritten = 0;
+    
+    while (!backupFile.eof()) {
+        backupFile.read(buffer, bufferSize);
+        std::streamsize bytesRead = backupFile.gcount();
         
-        // الحصول على حجم الملف
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                                  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            LARGE_INTEGER fileSize;
-            if (GetFileSizeEx(hFile, &fileSize)) {
-                image.size = fileSize.QuadPart;
-            }
-            CloseHandle(hFile);
+        if (bytesRead > 0) {
+            DWORD written;
+            WriteFile(hDevice, buffer, static_cast<DWORD>(bytesRead), &written, NULL);
+            bytesWritten += written;
+            
+            int progress = static_cast<int>((bytesWritten * 100) / totalSize);
+            UpdateProgress(progress, L"Restoring: " + std::to_wstring(progress) + L"%");
         }
-        
-        // محاولة قراءة معلومات ISO
-        // هذه دالة مبسطة، في النسخة الحقيقية ستكون أكثر تعقيداً
-        image.label = ExtractFileName(filePath);
-        image.type = DetectImageType(filePath);
-        image.isBootable = CheckIfBootable(filePath);
-        image.architecture = DetectArchitecture(filePath);
-        image.version = DetectVersion(filePath);
-        
-        return image;
     }
     
-private:
-    static std::wstring ExtractFileName(const std::wstring& path) {
-        size_t pos = path.find_last_of(L"\\/");
-        if (pos != std::wstring::npos) {
-            std::wstring filename = path.substr(pos + 1);
-            size_t dotPos = filename.find_last_of(L'.');
-            if (dotPos != std::wstring::npos) {
-                return filename.substr(0, dotPos);
-            }
-            return filename;
-        }
-        return path;
-    }
+    delete[] buffer;
+    FlushFileBuffers(hDevice);
+    CloseHandle(hDevice);
+    backupFile.close();
     
-    static std::wstring DetectImageType(const std::wstring& path) {
-        std::wstring ext = GetFileExtension(path);
-        if (ext == L"iso") return L"ISO Image";
-        if (ext == L"img") return L"Disk Image";
-        if (ext == L"vhd") return L"Virtual Hard Disk";
-        if (ext == L"vhdx") return L"Virtual Hard Disk v2";
-        if (ext == L"wim") return L"Windows Imaging";
-        return L"Unknown";
-    }
-    
-    static bool CheckIfBootable(const std::wstring& path) {
-        // تنفيذ مبسط للكشف عن إمكانية الإقلاع
-        // في النسخة الحقيقية، سيتم تحليل محتوى ISO
-        return true;
-    }
-    
-    static std::wstring DetectArchitecture(const std::wstring& path) {
-        // تنفيذ مبسط
-        return L"x64";
-    }
-    
-    static std::wstring DetectVersion(const std::wstring& path) {
-        // تنفيذ مبسط
-        return L"Unknown";
-    }
-    
-    static std::wstring GetFileExtension(const std::wstring& path) {
-        size_t dotPos = path.find_last_of(L'.');
-        if (dotPos != std::wstring::npos) {
-            std::wstring ext = path.substr(dotPos + 1);
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-            return ext;
-        }
-        return L"";
-    }
-};
+    LogMessage(L"Restore completed successfully");
+    return true;
+}
 
-class DiskWriter {
-private:
-    std::atomic<bool> cancelRequested;
-    std::atomic<int> progress;
-    HWND callbackWindow;
+void StartOperation() {
+    if (g_isRunning) {
+        g_cancelOperation = true;
+        return;
+    }
     
-public:
-    DiskWriter(HWND hwnd) : cancelRequested(false), progress(0), callbackWindow(hwnd) {}
+    if (!IsAdmin()) {
+        MessageBox(g_hMainWnd, L"Administrator privileges required!", L"Error", MB_OK | MB_ICONERROR);
+        ElevateProcess();
+        return;
+    }
     
-    bool WriteImageToDisk(const std::wstring& imagePath, const std::wstring& devicePath, 
-                         const PartitionScheme& scheme, const FormatOption& format,
-                         bool createPersistentStorage, size_t persistentSize) {
+    int deviceIndex = SendMessage(g_hDeviceCombo, CB_GETCURSEL, 0, 0);
+    if (deviceIndex == CB_ERR || deviceIndex >= static_cast<int>(g_devices.size())) {
+        MessageBox(g_hMainWnd, L"Please select a USB device!", L"Error", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    
+    if (g_selectedIsoPath.empty()) {
+        MessageBox(g_hMainWnd, L"Please select an ISO file!", L"Error", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    
+    g_selectedDevice = g_devices[deviceIndex].path;
+    
+    int result = MessageBox(g_hMainWnd,
+        L"WARNING: All data on the selected device will be destroyed!\n\nAre you sure you want to continue?",
+        L"Confirm Operation", MB_YESNO | MB_ICONWARNING);
+    
+    if (result != IDYES)
+        return;
+    
+    g_isRunning = true;
+    g_cancelOperation = false;
+    
+    SetWindowText(GetDlgItem(g_hMainWnd, IDC_START_BTN), L"Cancel");
+    EnableWindow(g_hDeviceCombo, FALSE);
+    EnableWindow(GetDlgItem(g_hMainWnd, IDC_BROWSE_BTN), FALSE);
+    
+    std::thread([=]() {
+        bool success = true;
         
-        cancelRequested = false;
-        progress = 0;
-        
-        Logger::Log(L"بدء عملية الكتابة: " + imagePath + L" إلى " + devicePath);
-        
-        // محاكاة العملية
-        for (int i = 0; i <= 100 && !cancelRequested; i++) {
-            progress = i;
+        try {
+            // Get settings
+            wchar_t label[256];
+            GetWindowText(g_hLabelEdit, label, 256);
             
-            // إرسال تحديث التقدم
-            if (callbackWindow) {
-                PostMessage(callbackWindow, WM_UPDATE_PROGRESS, i, 0);
+            int fsIndex = SendMessage(g_hFileSystemCombo, CB_GETCURSEL, 0, 0);
+            std::wstring fileSystem = fsIndex == 0 ? L"FAT32" : fsIndex == 1 ? L"NTFS" : L"exFAT";
+            
+            bool quickFormat = SendMessage(g_hQuickFormat, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool verifyWrite = SendMessage(g_hVerifyWrite, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool createPersistent = SendMessage(g_hPersistentPartition, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            
+            // Analyze ISO
+            UpdateProgress(5, L"Analyzing ISO file...");
+            ISOInfo isoInfo = AnalyzeISO(g_selectedIsoPath);
+            
+            if (!isoInfo.isBootable) {
+                LogMessage(L"Warning: ISO may not be bootable");
             }
             
-            // محاكاة العمل
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            
-            // تسجيل التقدم
-            if (i % 10 == 0) {
-                Logger::Log(L"التقدم: " + std::to_wstring(i) + L"%");
+            // Format drive
+            UpdateProgress(10, L"Formatting drive...");
+            if (!FormatDrive(g_selectedDevice, fileSystem, label, quickFormat)) {
+                throw std::runtime_error("Format failed");
             }
+            
+            if (g_cancelOperation) throw std::runtime_error("Cancelled");
+            
+            // Write ISO
+            UpdateProgress(20, L"Writing ISO to USB...");
+            if (!WriteISOToUSB(g_selectedIsoPath, g_selectedDevice)) {
+                throw std::runtime_error("Write failed");
+            }
+            
+            if (g_cancelOperation) throw std::runtime_error("Cancelled");
+            
+            // Make bootable
+            UpdateProgress(80, L"Installing bootloader...");
+            if (!MakeBootable(g_selectedDevice, isoInfo.bootType)) {
+                LogMessage(L"Warning: Bootloader installation may have failed");
+            }
+            
+            // Verify if requested
+            if (verifyWrite && !g_cancelOperation) {
+                if (!VerifyWrite(g_selectedDevice, g_selectedIsoPath)) {
+                    throw std::runtime_error("Verification failed");
+                }
+            }
+            
+            // Create persistent partition if requested
+            if (createPersistent && !g_cancelOperation) {
+                UpdateProgress(95, L"Creating persistent partition...");
+                CreatePersistentPartition(g_selectedDevice, 4);
+            }
+            
+            UpdateProgress(100, L"Operation completed successfully!");
+            LogMessage(L"All operations completed successfully");
+            
+            MessageBox(g_hMainWnd, L"USB drive created successfully!", L"Success", MB_OK | MB_ICONINFORMATION);
+            
+        } catch (const std::exception& e) {
+            success = false;
+            std::wstring error = L"Operation failed: ";
+            error += std::wstring(e.what(), e.what() + strlen(e.what()));
+            UpdateProgress(0, error);
+            MessageBox(g_hMainWnd, error.c_str(), L"Error", MB_OK | MB_ICONERROR);
         }
         
-        if (cancelRequested) {
-            Logger::Log(L"تم إلغاء العملية");
-            return false;
-        }
-        
-        Logger::Log(L"اكتملت العملية بنجاح");
-        return true;
-    }
-    
-    void Cancel() {
-        cancelRequested = true;
-    }
-    
-    int GetProgress() const {
-        return progress.load();
-    }
-};
+        g_isRunning = false;
+        SetWindowText(GetDlgItem(g_hMainWnd, IDC_START_BTN), L"START");
+        EnableWindow(g_hDeviceCombo, TRUE);
+        EnableWindow(GetDlgItem(g_hMainWnd, IDC_BROWSE_BTN), TRUE);
+    }).detach();
+}
 
-// النافذة الرئيسية
-class InfernoWindow {
-private:
-    HWND hWnd;
-    HINSTANCE hInstance;
-    HICON hIcon;
-    HFONT hTitleFont;
-    
-    // عناصر التحكم
-    HWND hDeviceCombo;
-    HWND hImagePathEdit;
-    HWND hImageBrowseBtn;
-    HWND hFormatCombo;
-    HWND hSchemeCombo;
-    HWND hProgressBar;
-    HWND hStartBtn;
-    HWND hCancelBtn;
-    HWND hLogEdit;
-    HWND hRefreshBtn;
-    HWND hAdvancedBtn;
-    HWND hSettingsBtn;
-    
-    // البيانات
-    std::vector<DeviceInfo> devices;
-    std::vector<PartitionScheme> partitionSchemes;
-    std::vector<FormatOption> formatOptions;
-    ISOImage currentImage;
-    
-    // كائنات المساعدة
-    USBDetector* usbDetector;
-    DiskWriter* diskWriter;
-    std::thread* writeThread;
-    
-    // إعدادات متقدمة
-    bool enableBadBlocksCheck;
-    bool enableCompression;
-    bool enableEncryption;
-    bool createPersistentStorage;
-    size_t persistentStorageSize;
-    std::wstring customLabel;
-    bool enableSecureBoot;
-    bool enableTPM;
-    
-public:
-    InfernoWindow(HINSTANCE hInst) : hInstance(hInst), hIcon(NULL), hTitleFont(NULL),
-                                     usbDetector(nullptr), diskWriter(nullptr), writeThread(nullptr),
-                                     enableBadBlocksCheck(true), enableCompression(false),
-                                     enableEncryption(false), createPersistentStorage(false),
-                                     persistentStorageSize(4096), enableSecureBoot(true),
-                                     enableTPM(false) {
-        
-        Logger::Initialize();
-        InitializeWindow();
-        LoadResources();
-        InitializeControls();
-        LoadSettings();
-        RefreshDeviceList();
-        LoadPartitionSchemes();
-        LoadFormatOptions();
-    }
-    
-    ~InfernoWindow() {
-        if (writeThread && writeThread->joinable()) {
-            writeThread->join();
-            delete writeThread;
-        }
-        
-        if (usbDetector) delete usbDetector;
-        if (diskWriter) delete diskWriter;
-        
-        if (hTitleFont) DeleteObject(hTitleFont);
-        if (hIcon) DestroyIcon(hIcon);
-    }
-    
-    void Show(int nCmdShow) {
-        ShowWindow(hWnd, nCmdShow);
-        UpdateWindow(hWnd);
-    }
-    
-    HWND GetHandle() const { return hWnd; }
-    
-private:
-    void InitializeWindow() {
-        WNDCLASSEXW wc = {0};
-        wc.cbSize = sizeof(WNDCLASSEXW);
-        wc.style = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc = WindowProc;
-        wc.hInstance = hInstance;
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = L"InfernoWindowClass";
-        wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(1));
-        
-        RegisterClassExW(&wc);
-        
-        hWnd = CreateWindowExW(0, wc.lpszClassName, L"Inferno - أداة حرق أنظمة التشغيل المتقدمة",
-                              WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 900, 700,
-                              NULL, NULL, hInstance, this);
-        
-        usbDetector = new USBDetector(hWnd);
-        diskWriter = new DiskWriter(hWnd);
-    }
-    
-    void LoadResources() {
-        // محاولة تحميل الأيقونة من الملف
-        hIcon = (HICON)LoadImageW(NULL, L"inferno.png", IMAGE_ICON, 64, 64, LR_LOADFROMFILE);
-        if (!hIcon) {
-            // إذا فشل، إنشاء أيقونة افتراضية
-            hIcon = CreateDefaultIcon();
-        }
-        
-        SendMessage(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
-        SendMessage(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
-        
-        // إنشاء خط العنوان
-        LOGFONTW lf = {0};
-        wcscpy_s(lf.lfFaceName, L"Segoe UI");
-        lf.lfHeight = 24;
-        lf.lfWeight = FW_BOLD;
-        hTitleFont = CreateFontIndirectW(&lf);
-    }
-    
-    HICON CreateDefaultIcon() {
-        HDC hdc = GetDC(NULL);
-        HDC hdcMem = CreateCompatibleDC(hdc);
-        HBITMAP hBitmap = CreateCompatibleBitmap(hdc, 64, 64);
-        HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBitmap);
-        
-        // رسم أيقونة افتراضية (شعلة)
-        HBRUSH hRedBrush = CreateSolidBrush(RGB(255, 69, 0));
-        HBRUSH hYellowBrush = CreateSolidBrush(RGB(255, 215, 0));
-        HBRUSH hOrangeBrush = CreateSolidBrush(RGB(255, 140, 0));
-        
-        RECT rect = {0, 0, 64, 64};
-        FillRect(hdcMem, &rect, (HBRUSH)GetStockObject(BLACK_BRUSH));
-        
-        // رسم الشعلة
-        POINT flame[] = {{32, 10}, {40, 40}, {32, 60}, {24, 40}};
-        SelectObject(hdcMem, hRedBrush);
-        Polygon(hdcMem, flame, 4);
-        
-        SelectObject(hdcMem, hYellowBrush);
-        Ellipse(hdcMem, 28, 15, 36, 30);
-        
-        SelectObject(hdcMem, hOrangeBrush);
-        Ellipse(hdcMem, 26, 25, 38, 40);
-        
-        SelectObject(hdcMem, hOldBitmap);
-        DeleteDC(hdcMem);
-        ReleaseDC(NULL, hdc);
-        
-        DeleteObject(hRedBrush);
-        DeleteObject(hYellowBrush);
-        DeleteObject(hOrangeBrush);
-        
-        return (HICON)hBitmap;
-    }
-    
-    void InitializeControls() {
-        // إنشاء الخطوط
-        HFONT hNormalFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                       DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        
-        // العنوان
-        CreateWindowW(L"STATIC", L"INFERNO", WS_CHILD | WS_VISIBLE | SS_CENTER,
-                      10, 10, 880, 40, hWnd, NULL, hInstance, NULL);
-        
-        // جهاز التخزين
-        CreateWindowW(L"STATIC", L"الجهاز:", WS_CHILD | WS_VISIBLE,
-                      20, 70, 100, 25, hWnd, NULL, hInstance, NULL);
-        
-        hDeviceCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | 
-                                    CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-                                    130, 70, 300, 200, hWnd, (HMENU)100, hInstance, NULL);
-        
-        hRefreshBtn = CreateWindowW(L"BUTTON", L"تحديث", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                    440, 70, 80, 25, hWnd, (HMENU)101, hInstance, NULL);
-        
-        // صورة النظام
-        CreateWindowW(L"STATIC", L"صورة النظام:", WS_CHILD | WS_VISIBLE,
-                      20, 110, 100, 25, hWnd, NULL, hInstance, NULL);
-        
-        hImagePathEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | 
-                                      WS_BORDER | ES_AUTOHSCROLL,
-                                      130, 110, 350, 25, hWnd, (HMENU)102, hInstance, NULL);
-        
-        hImageBrowseBtn = CreateWindowW(L"BUTTON", L"استعراض...", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                        490, 110, 80, 25, hWnd, (HMENU)103, hInstance, NULL);
-        
-        // مخطط التقسيم
-        CreateWindowW(L"STATIC", L"مخطط التقسيم:", WS_CHILD | WS_VISIBLE,
-                      20, 150, 100, 25, hWnd, NULL, hInstance, NULL);
-        
-        hSchemeCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | 
-                                    CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-                                    130, 150, 300, 200, hWnd, (HMENU)104, hInstance, NULL);
-        
-        // نظام الملفات
-        CreateWindowW(L"STATIC", L"نظام الملفات:", WS_CHILD | WS_VISIBLE,
-                      20, 190, 100, 25, hWnd, NULL, hInstance, NULL);
-        
-        hFormatCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | 
-                                    CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-                                    130, 190, 300, 200, hWnd, (HMENU)105, hInstance, NULL);
-        
-        // خيارات متقدمة
-        hAdvancedBtn = CreateWindowW(L"BUTTON", L"خيارات متقدمة >>", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                     450, 190, 150, 25, hWnd, (HMENU)106, hInstance, NULL);
-        
-        // شريط التقدم
-        CreateWindowW(L"STATIC", L"التقدم:", WS_CHILD | WS_VISIBLE,
-                      20, 250, 100, 25, hWnd, NULL, hInstance, NULL);
-        
-        hProgressBar = CreateWindowW(PROGRESS_CLASS, L"", WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-                                     130, 250, 400, 25, hWnd, (HMENU)107, hInstance, NULL);
-        
-        // أزرار التحكم
-        hStartBtn = CreateWindowW(L"BUTTON", L"بدء العملية", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                  20, 300, 120, 40, hWnd, (HMENU)108, hInstance, NULL);
-        
-        hCancelBtn = CreateWindowW(L"BUTTON", L"إلغاء", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_DISABLED,
-                                   150, 300, 120, 40, hWnd, (HMENU)109, hInstance, NULL);
-        
-        hSettingsBtn = CreateWindowW(L"BUTTON", L"الإعدادات", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                     280, 300, 120, 40, hWnd, (HMENU)110, hInstance, NULL);
-        
-        // سجل الأحداث
-        CreateWindowW(L"STATIC", L"سجل الأحداث:", WS_CHILD | WS_VISIBLE,
-                      20, 360, 100, 25, hWnd, NULL, hInstance, NULL);
-        
-        hLogEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | 
-                                ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
-                                20, 390, 850, 250, hWnd, (HMENU)111, hInstance, NULL);
-        
-        // تعيين الخطوط
-        EnumChildWindows(hWnd, SetChildFont, (LPARAM)hNormalFont);
-        
-        // تعيين الخط الخاص بالعنوان
-        HWND hTitle = GetDlgItem(hWnd, 1);
-        if (hTitle) {
-            SendMessage(hTitle, WM_SETFONT, (WPARAM)hTitleFont, TRUE);
-        }
-    }
-    
-    static BOOL CALLBACK SetChildFont(HWND hwnd, LPARAM lParam) {
-        SendMessage(hwnd, WM_SETFONT, (WPARAM)lParam, TRUE);
-        return TRUE;
-    }
-    
-    void LoadSettings() {
-        // هنا سيتم تحميل الإعدادات من الملف
-        enableBadBlocksCheck = true;
-        enableCompression = false;
-        enableEncryption = false;
-        createPersistentStorage = false;
-        persistentStorageSize = 4096;
-        customLabel = L"INFERNO_USB";
-        enableSecureBoot = true;
-        enableTPM = false;
-    }
-    
-    void RefreshDeviceList() {
-        SendMessage(hDeviceCombo, CB_RESETCONTENT, 0, 0);
-        
-        devices = usbDetector->DetectDevices();
-        
-        for (const auto& device : devices) {
-            std::wstring displayText = device.friendlyName + L" (" + 
-                                      FormatSize(device.totalSize) + L")";
-            
-            if (!device.volumeName.empty()) {
-                displayText += L" [" + device.volumeName + L"]";
-            }
-            
-            int index = SendMessageW(hDeviceCombo, CB_ADDSTRING, 0, (LPARAM)displayText.c_str());
-            SendMessageW(hDeviceCombo, CB_SETITEMDATA, index, (LPARAM)&device);
-        }
-        
-        if (!devices.empty()) {
-            SendMessage(hDeviceCombo, CB_SETCURSEL, 0, 0);
-        }
-        
-        AddLogMessage(L"تم تحديث قائمة الأجهزة");
-    }
-    
-    void LoadPartitionSchemes() {
-        partitionSchemes.clear();
-        
-        // MBR
-        partitionSchemes.push_back({L"MBR", L"mbr", 
-                                   L"نظام BIOS أو UEFI-CSM (التوافقية)", true, true});
-        
-        // GPT
-        partitionSchemes.push_back({L"GPT", L"gpt", 
-                                   L"نظام UEFI (الحديث)", true, false});
-        
-        // Hybrid
-        partitionSchemes.push_back({L"Hybrid", L"hybrid", 
-                                   L"MBR+GPT (متوافق مع BIOS وUEFI)", true, true});
-        
-        // إضافة إلى القائمة
-        SendMessage(hSchemeCombo, CB_RESETCONTENT, 0, 0);
-        for (const auto& scheme : partitionSchemes) {
-            std::wstring displayText = scheme.name + L" - " + scheme.description;
-            SendMessageW(hSchemeCombo, CB_ADDSTRING, 0, (LPARAM)displayText.c_str());
-        }
-        
-        SendMessage(hSchemeCombo, CB_SETCURSEL, 0, 0);
-    }
-    
-    void LoadFormatOptions() {
-        formatOptions.clear();
-        
-        // NTFS
-        formatOptions.push_back({L"NTFS", L"ntfs", L"INFERNO_USB"});
-        
-        // FAT32
-        formatOptions.push_back({L"FAT32", L"fat32", L"INFERNO_USB"});
-        
-        // exFAT
-        formatOptions.push_back({L"exFAT", L"exfat", L"INFERNO_USB"});
-        
-        // إضافة إلى القائمة
-        SendMessage(hFormatCombo, CB_RESETCONTENT, 0, 0);
-        for (const auto& format : formatOptions) {
-            SendMessageW(hFormatCombo, CB_ADDSTRING, 0, (LPARAM)format.name.c_str());
-        }
-        
-        SendMessage(hFormatCombo, CB_SETCURSEL, 0, 0);
-    }
-    
-    void BrowseForImage() {
-        OPENFILENAMEW ofn = {0};
-        wchar_t fileName[MAX_PATH_LENGTH] = {0};
-        
-        ofn.lStructSize = sizeof(OPENFILENAMEW);
-        ofn.hwndOwner = hWnd;
-        ofn.lpstrFilter = L"صور القرص\0*.iso;*.img;*.vhd;*.vhdx;*.wim\0كل الملفات\0*.*\0";
-        ofn.lpstrFile = fileName;
-        ofn.nMaxFile = MAX_PATH_LENGTH;
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-        ofn.lpstrTitle = L"اختر صورة نظام التشغيل";
-        
-        if (GetOpenFileNameW(&ofn)) {
-            SetWindowTextW(hImagePathEdit, fileName);
-            
-            // قراءة معلومات الصورة
-            currentImage = ImageReader::ReadISOInfo(fileName);
-            UpdateImageInfo();
-            
-            AddLogMessage(L"تم تحميل الصورة: " + std::wstring(fileName));
-        }
-    }
-    
-    void UpdateImageInfo() {
-        if (!currentImage.path.empty()) {
-            std::wstring info = L"تم تحميل: " + currentImage.label + 
-                               L" (" + FormatSize(currentImage.size) + L")";
-            
-            if (!currentImage.type.empty()) {
-                info += L" - نوع: " + currentImage.type;
-            }
-            
-            if (!currentImage.architecture.empty()) {
-                info += L" - بنية: " + currentImage.architecture;
-            }
-            
-            AddLogMessage(info);
-        }
-    }
-    
-    void StartWritingProcess() {
-        // الحصول على الجهاز المحدد
-        int deviceIndex = SendMessage(hDeviceCombo, CB_GETCURSEL, 0, 0);
-        if (deviceIndex == CB_ERR) {
-            MessageBoxW(hWnd, L"الرجاء اختيار جهاز تخزين", L"خطأ", MB_ICONERROR);
-            return;
-        }
-        
-        // الحصول على مسار الصورة
-        wchar_t imagePath[MAX_PATH_LENGTH];
-        GetWindowTextW(hImagePathEdit, imagePath, MAX_PATH_LENGTH);
-        if (wcslen(imagePath) == 0) {
-            MessageBoxW(hWnd, L"الرجاء اختيار صورة نظام التشغيل", L"خطأ", MB_ICONERROR);
-            return;
-        }
-        
-        // التحقق من وجود الملف
-        if (GetFileAttributesW(imagePath) == INVALID_FILE_ATTRIBUTES) {
-            MessageBoxW(hWnd, L"ملف الصورة غير موجود", L"خطأ", MB_ICONERROR);
-            return;
-        }
-        
-        // الحصول على مخطط التقسيم
-        int schemeIndex = SendMessage(hSchemeCombo, CB_GETCURSEL, 0, 0);
-        if (schemeIndex == CB_ERR) {
-            schemeIndex = 0;
-        }
-        
-        // الحصول على نظام الملفات
-        int formatIndex = SendMessage(hFormatCombo, CB_GETCURSEL, 0, 0);
-        if (formatIndex == CB_ERR) {
-            formatIndex = 0;
-        }
-        
-        // تأكيد العملية
-        std::wstring message = L"سيتم مسح جميع البيانات على الجهاز المحدد!\n\n";
-        message += L"هل أنت متأكد من المتابعة؟";
-        
-        if (MessageBoxW(hWnd, message.c_str(), L"تأكيد العملية", 
-                       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
-            return;
-        }
-        
-        // تعطيل أزرار التحكم
-        EnableWindow(hStartBtn, FALSE);
-        EnableWindow(hCancelBtn, TRUE);
-        EnableWindow(hDeviceCombo, FALSE);
-        EnableWindow(hImageBrowseBtn, FALSE);
-        EnableWindow(hSchemeCombo, FALSE);
-        EnableWindow(hFormatCombo, FALSE);
-        EnableWindow(hAdvancedBtn, FALSE);
-        
-        // إعادة تعيين شريط التقدم
-        SendMessage(hProgressBar, PBM_SETPOS, 0, 0);
-        
-        // بدء عملية الكتابة في thread منفصل
-        writeThread = new std::thread([this, deviceIndex, imagePath, schemeIndex, formatIndex]() {
-            // الحصول على معلومات الجهاز
-            DeviceInfo* device = (DeviceInfo*)SendMessage(hDeviceCombo, CB_GETITEMDATA, deviceIndex, 0);
-            
-            // تنفيذ عملية الكتابة
-            bool success = diskWriter->WriteImageToDisk(
-                imagePath, 
-                device ? device->devicePath : L"",
-                partitionSchemes[schemeIndex],
-                formatOptions[formatIndex],
-                createPersistentStorage,
-                persistentStorageSize
-            );
-            
-            // إعادة تمكين واجهة المستخدم
-            PostMessage(hWnd, WM_COMMAND, success ? 200 : 201, 0);
-        });
-    }
-    
-    void CancelWritingProcess() {
-        if (diskWriter) {
-            diskWriter->Cancel();
-            AddLogMessage(L"تم طلب إلغاء العملية...");
-        }
-    }
-    
-    void ShowAdvancedOptions() {
-        // نافذة الخيارات المتقدمة
-        DialogBoxParamW(hInstance, MAKEINTRESOURCE(1), hWnd, AdvancedOptionsProc, (LPARAM)this);
-    }
-    
-    void ShowSettings() {
-        // نافذة الإعدادات
-        MessageBoxW(hWnd, L"قريباً: نافذة الإعدادات المتقدمة", L"الإعدادات", MB_ICONINFORMATION);
-    }
-    
-    void AddLogMessage(const std::wstring& message) {
+void UpdateProgress(int percentage, const std::wstring& status) {
+    SendMessage(g_hProgress, PBM_SETPOS, percentage, 0);
+    SetWindowText(g_hStatusText, status.c_str());
+}
+
+void LogMessage(const std::wstring& message) {
+    std::wofstream logFile(L"inferno.log", std::ios::app);
+    if (logFile.is_open()) {
         SYSTEMTIME st;
         GetLocalTime(&st);
         
-        std::wstring timestamp = std::to_wstring(st.wHour) + L":" + 
-                                std::to_wstring(st.wMinute) + L":" +
-                                std::to_wstring(st.wSecond);
+        wchar_t timestamp[100];
+        swprintf_s(timestamp, L"[%04d-%02d-%02d %02d:%02d:%02d] ",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         
-        std::wstring logEntry = L"[" + timestamp + L"] " + message + L"\r\n";
-        
-        // إضافة إلى سجل البرنامج
-        int len = GetWindowTextLengthW(hLogEdit);
-        SendMessageW(hLogEdit, EM_SETSEL, len, len);
-        SendMessageW(hLogEdit, EM_REPLACESEL, FALSE, (LPARAM)logEntry.c_str());
-        
-        // تسجيل في ملف اللوج
-        Logger::Log(message);
+        logFile << timestamp << message << std::endl;
+        logFile.close();
     }
+}
+
+void ShowAboutDialog() {
+    std::wstring about = L"Inferno USB Creator v2.0.0\n\n";
+    about += L"Advanced Bootable USB Creation Tool\n\n";
+    about += L"Developer: Ahmed Nour Ahmed\n";
+    about += L"Location: Qena, Egypt\n\n";
+    about += L"Features:\n";
+    about += L"• Multi-boot USB support\n";
+    about += L"• UEFI & Legacy BIOS support\n";
+    about += L"• Persistent storage partition\n";
+    about += L"• Data verification\n";
+    about += L"• USB backup & restore\n";
+    about += L"• Speed testing\n";
+    about += L"• Secure boot support\n";
+    about += L"• Multiple file systems (FAT32, NTFS, exFAT)\n\n";
+    about += L"© 2024 Ahmed Nour Ahmed. All rights reserved.";
     
-    std::wstring FormatSize(uint64_t size) {
-        const wchar_t* units[] = {L"بايت", L"كيلوبايت", L"ميجابايت", L"جيجابايت", L"تيرابايت"};
-        int unitIndex = 0;
-        double formattedSize = (double)size;
-        
-        while (formattedSize >= 1024.0 && unitIndex < 4) {
-            formattedSize /= 1024.0;
-            unitIndex++;
-        }
-        
-        std::wstringstream ss;
-        ss << std::fixed << std::setprecision(2) << formattedSize << L" " << units[unitIndex];
-        return ss.str();
-    }
+    MessageBox(g_hMainWnd, about.c_str(), L"About Inferno", MB_OK | MB_ICONINFORMATION);
+}
+
+void ShowSettingsDialog() {
+    MessageBox(g_hMainWnd, L"Settings dialog - Coming soon!", L"Settings", MB_OK | MB_ICONINFORMATION);
+}
+
+void InitializeControls(HWND hWnd) {
+    // Device selection
+    CreateWindow(L"STATIC", L"Select Device:",
+        WS_CHILD | WS_VISIBLE,
+        20, 20, 120, 20, hWnd, NULL, NULL, NULL);
     
-    void OnDeviceChange() {
-        RefreshDeviceList();
-    }
+    g_hDeviceCombo = CreateWindow(L"COMBOBOX", NULL,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        150, 18, 350, 200, hWnd, (HMENU)IDC_DEVICE_COMBO, NULL, NULL);
     
-    void OnWritingComplete(bool success) {
-        // إعادة تمكين واجهة المستخدم
-        EnableWindow(hStartBtn, TRUE);
-        EnableWindow(hCancelBtn, FALSE);
-        EnableWindow(hDeviceCombo, TRUE);
-        EnableWindow(hImageBrowseBtn, TRUE);
-        EnableWindow(hSchemeCombo, TRUE);
-        EnableWindow(hFormatCombo, TRUE);
-        EnableWindow(hAdvancedBtn, TRUE);
+    CreateWindow(L"BUTTON", L"Refresh",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        510, 17, 80, 25, hWnd, (HMENU)IDC_REFRESH_BTN, NULL, NULL);
+    
+    // ISO file selection
+    CreateWindow(L"STATIC", L"ISO File:",
+        WS_CHILD | WS_VISIBLE,
+        20, 60, 120, 20, hWnd, NULL, NULL, NULL);
+    
+    g_hIsoPath = CreateWindow(L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_READONLY | ES_AUTOHSCROLL,
+        150, 58, 350, 25, hWnd, (HMENU)IDC_ISO_PATH, NULL, NULL);
+    
+    CreateWindow(L"BUTTON", L"Browse...",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        510, 57, 80, 25, hWnd, (HMENU)IDC_BROWSE_BTN, NULL, NULL);
+    
+    // Partition scheme
+    CreateWindow(L"STATIC", L"Partition Scheme:",
+        WS_CHILD | WS_VISIBLE,
+        20, 100, 120, 20, hWnd, NULL, NULL, NULL);
+    
+    g_hPartitionCombo = CreateWindow(L"COMBOBOX", NULL,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        150, 98, 200, 200, hWnd, (HMENU)IDC_PARTITION_COMBO, NULL, NULL);
+    
+    SendMessage(g_hPartitionCombo, CB_ADDSTRING, 0, (LPARAM)L"MBR (BIOS/UEFI)");
+    SendMessage(g_hPartitionCombo, CB_ADDSTRING, 0, (LPARAM)L"GPT (UEFI only)");
+    SendMessage(g_hPartitionCombo, CB_SETCURSEL, 0, 0);
+    
+    // File system
+    CreateWindow(L"STATIC", L"File System:",
+        WS_CHILD | WS_VISIBLE,
+        20, 140, 120, 20, hWnd, NULL, NULL, NULL);
+    
+    g_hFileSystemCombo = CreateWindow(L"COMBOBOX", NULL,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        150, 138, 200, 200, hWnd, (HMENU)IDC_FILESYSTEM_COMBO, NULL, NULL);
+    
+    SendMessage(g_hFileSystemCombo, CB_ADDSTRING, 0, (LPARAM)L"FAT32");
+    SendMessage(g_hFileSystemCombo, CB_ADDSTRING, 0, (LPARAM)L"NTFS");
+    SendMessage(g_hFileSystemCombo, CB_ADDSTRING, 0, (LPARAM)L"exFAT");
+    SendMessage(g_hFileSystemCombo, CB_SETCURSEL, 0, 0);
+    
+    // Cluster size
+    CreateWindow(L"STATIC", L"Cluster Size:",
+        WS_CHILD | WS_VISIBLE,
+        370, 140, 80, 20, hWnd, NULL, NULL, NULL);
+    
+    g_hClusterCombo = CreateWindow(L"COMBOBOX", NULL,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        460, 138, 130, 200, hWnd, (HMENU)IDC_CLUSTER_COMBO, NULL, NULL);
+    
+    SendMessage(g_hClusterCombo, CB_ADDSTRING, 0, (LPARAM)L"Default");
+    SendMessage(g_hClusterCombo, CB_ADDSTRING, 0, (LPARAM)L"4096 bytes");
+    SendMessage(g_hClusterCombo, CB_ADDSTRING, 0, (LPARAM)L"8192 bytes");
+    SendMessage(g_hClusterCombo, CB_ADDSTRING, 0, (LPARAM)L"16384 bytes");
+    SendMessage(g_hClusterCombo, CB_SETCURSEL, 0, 0);
+    
+    // Volume label
+    CreateWindow(L"STATIC", L"Volume Label:",
+        WS_CHILD | WS_VISIBLE,
+        20, 180, 120, 20, hWnd, NULL, NULL, NULL);
+    
+    g_hLabelEdit = CreateWindow(L"EDIT", L"INFERNO",
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+        150, 178, 200, 25, hWnd, (HMENU)IDC_LABEL_EDIT, NULL, NULL);
+    
+    // Options group box
+    CreateWindow(L"BUTTON", L"Format Options",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+        20, 220, 280, 150, hWnd, (HMENU)IDC_ADVANCED_GROUP, NULL, NULL);
+    
+    g_hQuickFormat = CreateWindow(L"BUTTON", L"Quick format",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        35, 245, 250, 20, hWnd, (HMENU)IDC_QUICK_FORMAT, NULL, NULL);
+    SendMessage(g_hQuickFormat, BM_SETCHECK, BST_CHECKED, 0);
+    
+    g_hBadBlocks = CreateWindow(L"BUTTON", L"Check device for bad blocks",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        35, 270, 250, 20, hWnd, (HMENU)IDC_BAD_BLOCKS, NULL, NULL);
+    
+    g_hExtendedLabel = CreateWindow(L"BUTTON", L"Create extended label and icon files",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        35, 295, 250, 20, hWnd, (HMENU)IDC_EXTENDED_LABEL, NULL, NULL);
+    
+    g_hBootableImage = CreateWindow(L"BUTTON", L"Create bootable disk using ISO",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        35, 320, 250, 20, hWnd, (HMENU)IDC_BOOTABLE_IMAGE, NULL, NULL);
+    SendMessage(g_hBootableImage, BM_SETCHECK, BST_CHECKED, 0);
+    
+    g_hVerifyWrite = CreateWindow(L"BUTTON", L"Verify write operation",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        35, 345, 250, 20, hWnd, (HMENU)IDC_VERIFY_WRITE, NULL, NULL);
+    
+    // Advanced options
+    CreateWindow(L"BUTTON", L"Advanced Features",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+        310, 220, 280, 150, hWnd, NULL, NULL, NULL);
+    
+    g_hPersistentPartition = CreateWindow(L"BUTTON", L"Create persistent partition",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        325, 245, 200, 20, hWnd, (HMENU)IDC_PERSISTENT_PARTITION, NULL, NULL);
+    
+    CreateWindow(L"STATIC", L"Size (GB):",
+        WS_CHILD | WS_VISIBLE,
+        540, 247, 50, 20, hWnd, NULL, NULL, NULL);
+    
+    g_hPersistentSize = CreateWindow(L"EDIT", L"4",
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+        535, 245, 40, 20, hWnd, (HMENU)IDC_PERSISTENT_SIZE, NULL, NULL);
+    
+    g_hMultiBoot = CreateWindow(L"BUTTON", L"Multi-boot support",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        325, 270, 250, 20, hWnd, (HMENU)IDC_MULTI_BOOT, NULL, NULL);
+    
+    g_hSecureBoot = CreateWindow(L"BUTTON", L"Secure Boot compatible",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        325, 295, 250, 20, hWnd, (HMENU)IDC_SECURE_BOOT, NULL, NULL);
+    
+    g_hUEFI_NTFS = CreateWindow(L"BUTTON", L"UEFI:NTFS support",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        325, 320, 250, 20, hWnd, (HMENU)IDC_UEFI_NTFS, NULL, NULL);
+    
+    g_hCompression = CreateWindow(L"BUTTON", L"Enable compression",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        325, 345, 250, 20, hWnd, (HMENU)IDC_COMPRESSION_CHECK, NULL, NULL);
+    
+    // Additional buttons
+    CreateWindow(L"BUTTON", L"Backup USB",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        20, 385, 120, 30, hWnd, (HMENU)IDC_BACKUP_BTN, NULL, NULL);
+    
+    CreateWindow(L"BUTTON", L"Restore USB",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        150, 385, 120, 30, hWnd, (HMENU)IDC_RESTORE_BTN, NULL, NULL);
+    
+    CreateWindow(L"BUTTON", L"Speed Test",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        280, 385, 120, 30, hWnd, (HMENU)IDC_SPEED_TEST_BTN, NULL, NULL);
+    
+    // Progress bar
+    g_hProgress = CreateWindow(PROGRESS_CLASS, NULL,
+        WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+        20, 435, 570, 25, hWnd, (HMENU)IDC_PROGRESS, NULL, NULL);
+    
+    SendMessage(g_hProgress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+    
+    // Status text
+    g_hStatusText = CreateWindow(L"STATIC", L"Ready",
+        WS_CHILD | WS_VISIBLE,
+        20, 470, 570, 20, hWnd, (HMENU)IDC_STATUS_TEXT, NULL, NULL);
+    
+    // Start button
+    CreateWindow(L"BUTTON", L"START",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON,
+        210, 500, 180, 40, hWnd, (HMENU)IDC_START_BTN, NULL, NULL);
+    
+    // Refresh device list
+    RefreshDeviceList();
+}
+
+LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_CREATE:
+        InitializeControls(hWnd);
+        break;
         
-        // تعيين شريط التقدم إلى 100%
-        SendMessage(hProgressBar, PBM_SETPOS, 100, 0);
-        
-        // عرض رسالة النتيجة
-        if (success) {
-            AddLogMessage(L"اكتملت العملية بنجاح!");
-            MessageBoxW(hWnd, L"اكتملت عملية حرق نظام التشغيل بنجاح!", 
-                       L"نجاح", MB_ICONINFORMATION);
-        } else {
-            AddLogMessage(L"فشلت العملية أو تم إلغاؤها");
-            MessageBoxW(hWnd, L"فشلت عملية حرق نظام التشغيل أو تم إلغاؤها", 
-                       L"فشل", MB_ICONERROR);
-        }
-        
-        // تنظيف thread
-        if (writeThread) {
-            if (writeThread->joinable()) {
-                writeThread->join();
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_BROWSE_BTN:
+            BrowseForISO();
+            break;
+            
+        case IDC_REFRESH_BTN:
+            RefreshDeviceList();
+            break;
+            
+        case IDC_START_BTN:
+            StartOperation();
+            break;
+            
+        case IDC_SPEED_TEST_BTN:
+            if (!g_devices.empty()) {
+                int deviceIndex = SendMessage(g_hDeviceCombo, CB_GETCURSEL, 0, 0);
+                if (deviceIndex != CB_ERR) {
+                    std::thread([=]() {
+                        TestUSBSpeed(g_devices[deviceIndex].path);
+                    }).detach();
+                }
             }
-            delete writeThread;
-            writeThread = nullptr;
-        }
-    }
-    
-    static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-        InfernoWindow* pThis = nullptr;
-        
-        if (uMsg == WM_NCCREATE) {
-            CREATESTRUCT* pCreate = (CREATESTRUCT*)lParam;
-            pThis = (InfernoWindow*)pCreate->lpCreateParams;
-            SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pThis);
-        } else {
-            pThis = (InfernoWindow*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
-        }
-        
-        if (pThis) {
-            return pThis->HandleMessage(uMsg, wParam, lParam);
-        }
-        
-        return DefWindowProcW(hwnd, uMsg, wParam, lParam);
-    }
-    
-    LRESULT HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
-        switch (uMsg) {
-            case WM_COMMAND:
-                return OnCommand(wParam, lParam);
+            break;
+            
+        case IDC_BACKUP_BTN:
+            if (!g_devices.empty()) {
+                wchar_t backupPath[MAX_PATH];
+                OPENFILENAME ofn = { sizeof(ofn) };
+                ofn.hwndOwner = hWnd;
+                ofn.lpstrFile = backupPath;
+                ofn.lpstrFile[0] = '\0';
+                ofn.nMaxFile = MAX_PATH;
+                ofn.lpstrFilter = L"Backup Files (*.img)\0*.img\0All Files (*.*)\0*.*\0";
+                ofn.lpstrDefExt = L"img";
+                ofn.Flags = OFN_OVERWRITEPROMPT;
                 
-            case WM_PAINT:
-                return OnPaint();
-                
-            case WM_DESTROY:
-                PostQuitMessage(0);
-                return 0;
-                
-            case WM_UPDATE_PROGRESS:
-                SendMessage(hProgressBar, PBM_SETPOS, wParam, 0);
-                return 0;
-                
-            case WM_DEVICE_CHANGE:
-                OnDeviceChange();
-                return 0;
-                
-            case WM_CLOSE:
-                if (diskWriter && diskWriter->GetProgress() > 0 && 
-                    diskWriter->GetProgress() < 100) {
-                    if (MessageBoxW(hWnd, L"العملية جارية، هل تريد الإغلاق؟", 
-                                   L"تأكيد", MB_YESNO | MB_ICONWARNING) == IDNO) {
-                        return 0;
+                if (GetSaveFileName(&ofn)) {
+                    int deviceIndex = SendMessage(g_hDeviceCombo, CB_GETCURSEL, 0, 0);
+                    if (deviceIndex != CB_ERR) {
+                        std::thread([=]() {
+                            BackupUSB(g_devices[deviceIndex].path, backupPath);
+                        }).detach();
                     }
                 }
-                break;
-        }
-        
-        return DefWindowProcW(hWnd, uMsg, wParam, lParam);
-    }
-    
-    LRESULT OnCommand(WPARAM wParam, LPARAM lParam) {
-        int cmd = LOWORD(wParam);
-        
-        switch (cmd) {
-            case 101: // تحديث
-                RefreshDeviceList();
-                break;
+            }
+            break;
+            
+        case IDC_RESTORE_BTN:
+            if (!g_devices.empty()) {
+                wchar_t backupPath[MAX_PATH];
+                OPENFILENAME ofn = { sizeof(ofn) };
+                ofn.hwndOwner = hWnd;
+                ofn.lpstrFile = backupPath;
+                ofn.lpstrFile[0] = '\0';
+                ofn.nMaxFile = MAX_PATH;
+                ofn.lpstrFilter = L"Backup Files (*.img)\0*.img\0All Files (*.*)\0*.*\0";
+                ofn.Flags = OFN_FILEMUSTEXIST;
                 
-            case 103: // استعراض
-                BrowseForImage();
-                break;
-                
-            case 108: // بدء
-                StartWritingProcess();
-                break;
-                
-            case 109: // إلغاء
-                CancelWritingProcess();
-                break;
-                
-            case 106: // خيارات متقدمة
-                ShowAdvancedOptions();
-                break;
-                
-            case 110: // إعدادات
-                ShowSettings();
-                break;
-                
-            case 200: // اكتمال ناجح
-                OnWritingComplete(true);
-                break;
-                
-            case 201: // اكتمال فاشل
-                OnWritingComplete(false);
-                break;
-        }
-        
-        return 0;
-    }
-    
-    LRESULT OnPaint() {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        
-        // رسم خلفية العنوان
-        RECT titleRect = {0, 0, 900, 60};
-        HBRUSH hTitleBrush = CreateSolidBrush(RGB(40, 40, 40));
-        FillRect(hdc, &titleRect, hTitleBrush);
-        DeleteObject(hTitleBrush);
-        
-        // رسم نص العنوان
-        SetTextColor(hdc, RGB(255, 165, 0));
-        SetBkMode(hdc, TRANSPARENT);
-        HFONT hOldFont = (HFONT)SelectObject(hdc, hTitleFont);
-        
-        RECT textRect = {0, 15, 900, 45};
-        DrawTextW(hdc, L"INFERNO - أداة حرق أنظمة التشغيل المتقدمة", -1, 
-                 &textRect, DT_CENTER | DT_SINGLELINE);
-        
-        SelectObject(hdc, hOldFont);
-        
-        // رسم إصدار البرنامج
-        HFONT hSmallFont = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                      DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        SelectObject(hdc, hSmallFont);
-        SetTextColor(hdc, RGB(200, 200, 200));
-        
-        std::wstring versionText = L"الإصدار " + std::wstring(INFERNO_VERSION) + 
-                                  L" (بناء " + std::wstring(INFERNO_BUILD) + L")";
-        
-        RECT versionRect = {10, 45, 300, 60};
-        DrawTextW(hdc, versionText.c_str(), -1, &versionRect, DT_LEFT | DT_SINGLELINE);
-        
-        SelectObject(hdc, GetStockObject(SYSTEM_FONT));
-        DeleteObject(hSmallFont);
-        
-        EndPaint(hWnd, &ps);
-        return 0;
-    }
-    
-    static INT_PTR CALLBACK AdvancedOptionsProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-        static InfernoWindow* pThis = nullptr;
-        
-        switch (uMsg) {
-            case WM_INITDIALOG:
-                pThis = (InfernoWindow*)lParam;
-                InitializeAdvancedDialog(hDlg, pThis);
-                return TRUE;
-                
-            case WM_COMMAND:
-                switch (LOWORD(wParam)) {
-                    case IDOK:
-                        SaveAdvancedOptions(hDlg, pThis);
-                        EndDialog(hDlg, IDOK);
-                        return TRUE;
-                        
-                    case IDCANCEL:
-                        EndDialog(hDlg, IDCANCEL);
-                        return TRUE;
+                if (GetOpenFileName(&ofn)) {
+                    int deviceIndex = SendMessage(g_hDeviceCombo, CB_GETCURSEL, 0, 0);
+                    if (deviceIndex != CB_ERR) {
+                        std::thread([=]() {
+                            RestoreUSB(backupPath, g_devices[deviceIndex].path);
+                        }).detach();
+                    }
                 }
-                break;
+            }
+            break;
+            
+        case IDM_ABOUT:
+            ShowAboutDialog();
+            break;
+            
+        case IDM_SETTINGS:
+            ShowSettingsDialog();
+            break;
+            
+        case IDM_EXIT:
+            PostQuitMessage(0);
+            break;
         }
+        break;
         
-        return FALSE;
+    case WM_CLOSE:
+        if (g_isRunning) {
+            int result = MessageBox(hWnd,
+                L"Operation in progress. Are you sure you want to exit?",
+                L"Confirm Exit", MB_YESNO | MB_ICONQUESTION);
+            if (result == IDNO)
+                return 0;
+            g_cancelOperation = true;
+        }
+        DestroyWindow(hWnd);
+        break;
+        
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        break;
+        
+    default:
+        return DefWindowProc(hWnd, message, wParam, lParam);
     }
-    
-    static void InitializeAdvancedDialog(HWND hDlg, InfernoWindow* pThis) {
-        // هنا سيتم تهيئة عناصر التحكم في نافذة الخيارات المتقدمة
-        // هذه دالة مساعدة مبسطة
-    }
-    
-    static void SaveAdvancedOptions(HWND hDlg, InfernoWindow* pThis) {
-        // هنا سيتم حفظ الخيارات المتقدمة
-        // هذه دالة مساعدة مبسطة
-    }
-};
+    return 0;
+}
 
-// نقطة دخول البرنامج
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
-    // تهيئة عناصر التحكم الشائعة
-    INITCOMMONCONTROLSEX icc = {0};
-    icc.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icc.dwICC = ICC_WIN95_CLASSES | ICC_PROGRESS_CLASS;
-    InitCommonControlsEx(&icc);
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    InitCommonControls();
     
-    // إنشاء وتشغيل النافذة الرئيسية
-    InfernoWindow mainWindow(hInstance);
+    // Register window class
+    WNDCLASSEX wc = { sizeof(WNDCLASSEX) };
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"InfernoUSBCreator";
+    wc.hIconSm = LoadIcon(NULL, IDI_APPLICATION);
     
-    if (!mainWindow.GetHandle()) {
-        MessageBoxW(NULL, L"فشل إنشاء النافذة الرئيسية", L"خطأ", MB_ICONERROR);
-        return 1;
+    if (!RegisterClassEx(&wc)) {
+        MessageBox(NULL, L"Window Registration Failed!", L"Error", MB_ICONERROR);
+        return 0;
     }
     
-    mainWindow.Show(nCmdShow);
+    // Create menu
+    HMENU hMenu = CreateMenu();
+    HMENU hFileMenu = CreateMenu();
+    AppendMenu(hFileMenu, MF_STRING, IDM_SETTINGS, L"Settings");
+    AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hFileMenu, MF_STRING, IDM_EXIT, L"Exit");
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, L"File");
     
-    // حلقة الرسائل
-    MSG msg = {0};
+    HMENU hHelpMenu = CreateMenu();
+    AppendMenu(hHelpMenu, MF_STRING, IDM_CHECK_UPDATE, L"Check for Updates");
+    AppendMenu(hHelpMenu, MF_STRING, IDM_LOG, L"View Log");
+    AppendMenu(hHelpMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hHelpMenu, MF_STRING, IDM_ABOUT, L"About");
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hHelpMenu, L"Help");
+    
+    // Create main window
+    g_hMainWnd = CreateWindowEx(
+        WS_EX_CLIENTEDGE,
+        L"InfernoUSBCreator",
+        APP_NAME,
+        WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
+        CW_USEDEFAULT, CW_USEDEFAULT, 620, 600,
+        NULL, hMenu, hInstance, NULL);
+    
+    if (!g_hMainWnd) {
+        MessageBox(NULL, L"Window Creation Failed!", L"Error", MB_ICONERROR);
+        return 0;
+    }
+    
+    ShowWindow(g_hMainWnd, nCmdShow);
+    UpdateWindow(g_hMainWnd);
+    
+    // Message loop
+    MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
     
-    return 0;
+    CoUninitialize();
+    return static_cast<int>(msg.wParam);
 }
