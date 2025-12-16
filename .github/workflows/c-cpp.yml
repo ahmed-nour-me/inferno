@@ -1,0 +1,60 @@
+name: Build Inferno
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        choco install mingw -y
+        choco install cmake -y
+        choco install innounp -y
+        
+    - name: Configure CMake
+      run: |
+        mkdir build
+        cd build
+        cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} ..
+        
+    - name: Build
+      run: |
+        cd build
+        cmake --build . --config ${{env.BUILD_TYPE}}
+        
+    - name: Create Resources
+      run: |
+        mkdir -p resources
+        # سيقوم البرنامج بإنشاء logo افتراضي إذا لم يكن موجوداً
+        echo "Creating resource directory..."
+        
+    - name: Package Application
+      run: |
+        mkdir -p dist
+        copy build\inferno.exe dist\
+        if exist inferno.png copy inferno.png dist\
+        
+        # Create installer script
+        echo "@echo off" > dist\install.bat
+        echo "echo Installing Inferno..." >> dist\install.bat
+        echo "copy inferno.exe %ProgramFiles%\Inferno\" >> dist\install.bat
+        echo "echo Installation complete!" >> dist\install.bat
+        
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Inferno-Windows
+        path: dist/
+        retention-days: 5
