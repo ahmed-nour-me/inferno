@@ -1,10 +1,10 @@
-name: Build Inferno USB Creator
+name: Build Inferno
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -15,103 +15,216 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
       
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v1.1
-      
     - name: Setup MSVC
-      uses: ilammy/msvc-dev-cmd@v1
+      uses: microsoft/setup-msbuild@v1
       
-    - name: Create build directory
-      run: mkdir build
-      
-    - name: Compile Inferno
-      shell: cmd
+    - name: Install dependencies
       run: |
-        cl.exe /EHsc /std:c++17 /O2 /MT ^
-        /D_UNICODE /DUNICODE ^
-        /I"%INCLUDE%" ^
-        /Fe:build\Inferno.exe ^
-        inferno.cpp ^
-        /link ^
-        user32.lib gdi32.lib comctl32.lib comdlg32.lib ^
-        shell32.lib ole32.lib setupapi.lib ^
-        /SUBSYSTEM:WINDOWS ^
-        /MANIFESTUAC:level='requireAdministrator'
+        # Install Windows SDK
+        choco install windows-sdk-10.1 -y
+        # Install ImageMagick for logo processing (optional)
+        choco install imagemagick -y
         
-    - name: Verify build
+    - name: Create resource files
       run: |
-        if (Test-Path "build\Inferno.exe") {
-          Write-Host "Build successful! Inferno.exe created."
-          Get-Item "build\Inferno.exe" | Select-Object Name, Length, LastWriteTime
-        } else {
-          Write-Error "Build failed! Inferno.exe not found."
-          exit 1
+        # Create resource file for the application
+        $rcContent = @'
+#include <windows.h>
+#include "resource.h"
+
+APP_ICON ICON "app.ico"
+INFERNO_LOGO PNG "inferno.png"
+
+STRINGTABLE
+BEGIN
+    IDS_APP_TITLE      "Inferno - Advanced Bootable USB Creator"
+    IDS_VERSION        "3.0.0"
+    IDS_COPYRIGHT      "© 2024 Inferno Project. All Rights Reserved."
+    IDS_AUTHOR         "Ahmed Nour Ahmed - Qena"
+END
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     3,0,0,0
+PRODUCTVERSION  3,0,0,0
+FILEFLAGSMASK   0x3fL
+FILEFLAGS       0x0L
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Inferno Project"
+            VALUE "FileDescription", "Advanced Bootable USB Creator"
+            VALUE "FileVersion", "3.0.0.0"
+            VALUE "InternalName", "inferno"
+            VALUE "LegalCopyright", "© 2024 Inferno Project. All Rights Reserved."
+            VALUE "OriginalFilename", "inferno.exe"
+            VALUE "ProductName", "Inferno"
+            VALUE "ProductVersion", "3.0.0.0"
+            VALUE "Comments", "Created by Ahmed Nour Ahmed from Qena"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+'@
+        
+        $rcContent | Out-File -Encoding UTF8 inferno.rc
+        
+        # Create resource.h
+        $resourceH = @'
+#pragma once
+
+#define APP_ICON        101
+#define INFERNO_LOGO    102
+
+#define IDS_APP_TITLE   1001
+#define IDS_VERSION     1002
+#define IDS_COPYRIGHT   1003
+#define IDS_AUTHOR      1004
+'@
+        
+        $resourceH | Out-File -Encoding UTF8 resource.h
+        
+        # Create a simple icon if not exists
+        if (!(Test-Path "app.ico")) {
+            # Create placeholder icon using ImageMagick
+            magick convert -size 256x256 xc:#FF0000 -fill "#FF6600" -draw "circle 128,128 128,64" -fill "#FFFF00" -draw "circle 128,128 128,96" app.ico
         }
-      shell: pwsh
-      
-    - name: Create resources folder
+        
+        # Create placeholder logo if not exists
+        if (!(Test-Path "inferno.png")) {
+            magick convert -size 512x512 gradient:red-yellow -fill orange -draw "polygon 256,100 356,256 256,412 156,256" -fill yellow -draw "polygon 256,150 306,256 256,362 206,256" -fill red -draw "circle 256,256 256,236" inferno.png
+        }
+        
+    - name: Compile resources
       run: |
-        mkdir build\resources
-        echo "Place inferno.png logo here" > build\resources\README.txt
-      
+        rc.exe /fo inferno.res inferno.rc
+        
+    - name: Compile C++ code
+      run: |
+        cl.exe /EHsc /O2 /std:c++17 /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.19041.0\um" /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.19041.0\shared" inferno.cpp inferno.res user32.lib gdi32.lib shell32.lib shlwapi.lib setupapi.lib comctl32.lib winmm.lib /link /SUBSYSTEM:WINDOWS /OUT:inferno.exe
+        
+    - name: Create release package
+      run: |
+        # Create directory structure
+        New-Item -ItemType Directory -Path "release" -Force
+        New-Item -ItemType Directory -Path "release\x64" -Force
+        New-Item -ItemType Directory -Path "release\x86" -Force
+        
+        # Copy executable
+        Copy-Item "inferno.exe" -Destination "release\x64\inferno.exe"
+        
+        # Copy resource files
+        Copy-Item "inferno.png" -Destination "release\x64\inferno.png"
+        Copy-Item "app.ico" -Destination "release\x64\app.ico"
+        
+        # Create README
+        $readme = @'
+# Inferno - Advanced Bootable USB Creator
+
+## Version 3.0.0
+
+### Description
+Inferno is an advanced bootable USB creator with features surpassing traditional tools like Rufus. Created by Ahmed Nour Ahmed from Qena.
+
+### Features
+- Create bootable USB drives from ISO images
+- Support for multiple partition schemes (MBR/GPT)
+- Advanced encryption and security features
+- Multi-boot support
+- Cloud integration
+- Diagnostic tools
+- Real-time monitoring
+- And much more...
+
+### System Requirements
+- Windows 7 or later
+- 2GB RAM minimum
+- Administrator privileges
+
+### Usage
+1. Run inferno.exe as Administrator
+2. Select your USB drive
+3. Choose an ISO image
+4. Configure advanced options if needed
+5. Click START to create bootable USB
+
+### License
+© 2024 Inferno Project. All Rights Reserved.
+
+### Developer
+Ahmed Nour Ahmed - Qena, Egypt
+'@
+        
+        $readme | Out-File -Encoding UTF8 "release\README.txt"
+        
+        # Create license file
+        $license = @'
+MIT License
+
+Copyright (c) 2024 Inferno Project
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+'@
+        
+        $license | Out-File -Encoding UTF8 "release\LICENSE.txt"
+        
+        # Create ZIP archive
+        Compress-Archive -Path "release\*" -DestinationPath "inferno_v3.0.0.zip" -Force
+        
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Inferno-USB-Creator-Windows
+        name: Inferno-Build
         path: |
-          build/Inferno.exe
-          build/resources/
-        retention-days: 90
+          inferno.exe
+          inferno_v3.0.0.zip
+          release/
         
     - name: Create Release
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: v2.0.0-${{ github.run_number }}
-        name: Inferno USB Creator v2.0.0 Build ${{ github.run_number }}
+        files: inferno_v3.0.0.zip
         body: |
-          ## Inferno USB Creator - Advanced Bootable USB Tool
+          # Inferno v3.0.0
           
-          **Developer:** Ahmed Nour Ahmed (Qena, Egypt)
+          ## Advanced Bootable USB Creator
           
-          ### Features:
-          - ✅ Multi-boot USB support
-          - ✅ UEFI & Legacy BIOS compatibility
-          - ✅ Persistent storage partition creation
-          - ✅ Data verification after write
-          - ✅ USB backup and restore
-          - ✅ Speed testing capabilities
-          - ✅ Secure Boot support
-          - ✅ Multiple file systems (FAT32, NTFS, exFAT)
-          - ✅ Bad blocks checking
-          - ✅ Compression support
-          - ✅ Extended label and icon files
+          ### New Features:
+          - Enhanced security with encryption
+          - Multi-boot support
+          - Cloud backup integration
+          - Real-time monitoring
+          - Advanced diagnostic tools
+          - SSD optimization
+          - RAID driver integration
           
           ### System Requirements:
           - Windows 7 or later
-          - Administrator privileges required
-          - USB device for bootable media creation
+          - 2GB RAM minimum
           
-          ### Installation:
-          1. Download Inferno.exe
-          2. Place inferno.png logo in the same directory (optional)
-          3. Run as Administrator
-          
-          ### Usage:
-          1. Select your USB device
-          2. Browse for ISO file
-          3. Configure options (file system, partition scheme, etc.)
-          4. Click START to begin
-          
-          **⚠️ WARNING:** All data on the selected USB device will be erased!
-          
-          ### Build Info:
-          - Build Number: ${{ github.run_number }}
-          - Commit: ${{ github.sha }}
-          - Date: ${{ github.event.head_commit.timestamp }}
-        files: |
-          build/Inferno.exe
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ### Developer:
+          Ahmed Nour Ahmed - Qena, Egypt
