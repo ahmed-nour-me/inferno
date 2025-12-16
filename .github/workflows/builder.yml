@@ -1,0 +1,85 @@
+name: Build Inferno
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        choco install mingw -y
+        choco install cmake -y
+        choco install make -y
+        
+    - name: Configure CMake
+      run: |
+        mkdir build
+        cd build
+        cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} ..
+        
+    - name: Build
+      run: |
+        cd build
+        cmake --build . --config ${{env.BUILD_TYPE}}
+        
+    - name: Create Default Icon
+      run: |
+        # إنشاء أيقونة افتراضية إذا لم تكن موجودة
+        if not exist inferno.png (
+          echo Creating default icon...
+          # يمكن إضافة سكريبت لإنشاء أيقونة هنا
+        )
+        
+    - name: Package Application
+      run: |
+        mkdir -p dist
+        copy build\inferno.exe dist\
+        if exist inferno.png copy inferno.png dist\
+        
+        # إنشاء ملف README
+        echo # Inferno - Advanced OS Burning Tool > dist\README.md
+        echo. >> dist\README.md
+        echo ## Features >> dist\README.md
+        echo - Supports Windows, Linux, macOS images >> dist\README.md
+        echo - Multiple partition schemes >> dist\README.md
+        echo - Advanced options >> dist\README.md
+        echo - Logging system >> dist\README.md
+        
+        # إنشاء سكريبت التثبيت
+        echo @echo off > dist\install.bat
+        echo echo Installing Inferno... >> dist\install.bat
+        echo if not exist "%ProgramFiles%\Inferno" mkdir "%ProgramFiles%\Inferno" >> dist\install.bat
+        echo copy inferno.exe "%ProgramFiles%\Inferno\" >> dist\install.bat
+        echo copy inferno.png "%ProgramFiles%\Inferno\" >> dist\install.bat
+        echo echo Creating shortcut... >> dist\install.bat
+        echo echo WindowsScriptHost.CreateShortcut("%USERPROFILE%\Desktop\Inferno.lnk").TargetPath = "%ProgramFiles%\Inferno\inferno.exe" > "%TEMP%\create_shortcut.vbs" >> dist\install.bat
+        echo cscript //nologo "%TEMP%\create_shortcut.vbs" >> dist\install.bat
+        echo echo Installation complete! >> dist\install.bat
+        
+    - name: Create ZIP Archive
+      run: |
+        cd dist
+        7z a inferno-windows-${{ github.sha }}.zip *
+        
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Inferno-Windows
+        path: |
+          dist/inferno.exe
+          dist/inferno.png
+          dist/README.md
+          dist/inferno-windows-*.zip
+        retention-days: 30
