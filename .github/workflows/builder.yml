@@ -1,4 +1,4 @@
-name: Build Inferno 
+name: Build Inferno
 
 on:
   push:
